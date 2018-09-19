@@ -121,7 +121,7 @@ cudaError_t TestIntMath()
 	a[0] = 0;
 	a[1] = uint64_t(-1);
 	uint64_t k = 11400714819323198485ULL;
-	for (int i = 2; i < NUMBERS_PER_DIVISOR - 1; ++i)
+	for (int i = 2; i < NUMBERS_PER_DIVISOR; ++i)
 	{
 		a[i] = k;
 		k = k * 2862933555777941757ULL + 3037000493;
