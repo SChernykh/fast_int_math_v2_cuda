@@ -92,7 +92,7 @@ __device__ __forceinline__ uint32_t fast_sqrt_v2(const uint64_t n1)
 
 	const uint32_t x0 = __float_as_uint(x) - (158U << 23);
 	const int64_t delta0 = n1 - (((int64_t)(x0) * x0) << 18);
-	const float delta = __int2float_rn(((uint32_t*)&delta0)[1]) * x1;
+	const float delta = __int2float_rn(((int32_t*)&delta0)[1]) * x1;
 
 	uint32_t result = (x0 << 10) + __float2int_rn(delta);
 	const uint32_t s = result >> 1;
