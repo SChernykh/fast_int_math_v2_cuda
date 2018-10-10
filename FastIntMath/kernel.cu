@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <vector>
+#include <Windows.h>
 
 constexpr size_t TEST_SQRT_STEP = 1 << 26;
 constexpr size_t TEST_DIV_STEP = 1 << 21;
@@ -13,20 +14,13 @@ constexpr int NUMBERS_PER_DIVISOR = 256;
 // Run "generate_ptx.bat" and search for "fast_div_v2 BEGIN" in kernel.ptx to look at generated PTX assembly
 __global__ void DummyFastDivPTX(const uint64_t* _a, const uint32_t* _b, uint64_t* _result)
 {
-	__shared__ uint32_t RCP[256];
-	for (int i = threadIdx.x; i < 256; i += blockDim.x)
-	{
-		RCP[i] = RCP_C[i];
-	}
-	__syncthreads();
-
 	const int index = blockIdx.x * blockDim.x + threadIdx.x;
 	const uint64_t a = _a[index];
 	const uint32_t b = _b[index];
 	uint64_t result;
 
 	asm("// fast_div_v2 BEGIN");
-	result = fast_div_v2(RCP, a, b);
+	result = fast_div_v2(a, b);
 	asm("// fast_div_v2 END");
 
 	_result[index] = result;
@@ -48,19 +42,11 @@ __global__ void DummyFastSqrtPTX(const uint64_t* _a, uint32_t* _result)
 
 __global__ void FastDivTest(const uint64_t* _a, const uint32_t base, uint64_t* err_value)
 {
-	__shared__ uint32_t RCP[256];
-	for (int i = threadIdx.x; i < 256; i += blockDim.x)
-	{
-		RCP[i] = RCP_C[i];
-	}
-	__syncthreads();
-
-	const int index = blockIdx.x * blockDim.x + threadIdx.x;
-	const uint64_t a = _a[index % NUMBERS_PER_DIVISOR];
-	uint32_t b = base + (index / NUMBERS_PER_DIVISOR);
+	const uint64_t a = _a[threadIdx.x];
+	uint32_t b = base + blockIdx.x;
 	if (b == 0x80000000UL) b = 0x80000001UL;
 
-	const uint64_t fast_div_result = fast_div_v2(RCP, a, b);
+	const uint64_t fast_div_result = fast_div_v2(a, b);
 	const uint64_t correct_result = (uint64_t(a % b) << 32) + (uint32_t)(a / b);
 	if ((fast_div_result != correct_result) && (atomicAdd((uint32_t*)err_value, 1) == 0))
 	{
@@ -68,6 +54,19 @@ __global__ void FastDivTest(const uint64_t* _a, const uint32_t base, uint64_t* e
 		err_value[2] = b;
 		err_value[3] = fast_div_result;
 		err_value[4] = correct_result;
+	}
+}
+
+__global__ void FastDivBench(const uint64_t* _a, const uint32_t base, uint64_t* err_value)
+{
+	const uint64_t a = _a[threadIdx.x];
+	uint32_t b = base + blockIdx.x;
+	if (b == 0x80000000UL) b = 0x80000001UL;
+
+	const uint64_t fast_div_result = fast_div_v2(a, b);
+	if (fast_div_result == 1)
+	{
+		err_value[0] = 0;
 	}
 }
 
@@ -117,6 +116,8 @@ __global__ void FastSqrtTest(const uint32_t base, uint64_t* err_value)
 
 cudaError_t TestIntMath()
 {
+	int64_t dt;
+
 	uint64_t a[NUMBERS_PER_DIVISOR];
 	a[0] = 0;
 	a[1] = uint64_t(-1);
@@ -189,12 +190,44 @@ cudaError_t TestIntMath()
 		}
 	}
 
+	printf("Benchmarking fast_div_v2 (all divisors, %d numbers per divisor)\n", NUMBERS_PER_DIVISOR);
+	LARGE_INTEGER f;
+	QueryPerformanceFrequency(&f);
+	dt = 0;
+	for (uint64_t base = 0x80000000ULL; base < 0x100000000ULL; base += TEST_DIV_STEP * 16)
+	{
+		printf("%.1f%% done\r", (base - 0x80000000ULL) * 100.0 / (0x100000000ULL - 0x80000000ULL));
+
+		LARGE_INTEGER t1, t2;
+		QueryPerformanceCounter(&t1);
+
+		FastDivBench<<<TEST_DIV_STEP * 16, NUMBERS_PER_DIVISOR>>>(dev_a, (uint32_t)(base), dev_err_value);
+
+		cudaStatus = cudaGetLastError();
+		if (cudaStatus != cudaSuccess)
+		{
+			fprintf(stderr, "FastDivTest launch failed: %s\n", cudaGetErrorString(cudaStatus));
+			goto Error;
+		}
+
+		cudaStatus = cudaDeviceSynchronize();
+		if (cudaStatus != cudaSuccess)
+		{
+			fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
+			goto Error;
+		}
+
+		QueryPerformanceCounter(&t2);
+		dt += t2.QuadPart - t1.QuadPart;
+	}
+	printf("100.0%% done, %.3f seconds\n", static_cast<double>(dt) / f.QuadPart);
+
 	printf("Testing fast_div_v2 (all divisors, %d numbers per divisor)\n", NUMBERS_PER_DIVISOR);
 	for (uint64_t base = 0x80000000ULL; base < 0x100000000ULL; base += TEST_DIV_STEP)
 	{
 		printf("%.1f%% done\r", (base - 0x80000000ULL) * 100.0 / (0x100000000ULL - 0x80000000ULL));
 
-		FastDivTest<<<(TEST_DIV_STEP * NUMBERS_PER_DIVISOR) / 256, 256>>>(dev_a, (uint32_t)(base), dev_err_value);
+		FastDivTest<<<TEST_DIV_STEP, NUMBERS_PER_DIVISOR>>>(dev_a, (uint32_t)(base), dev_err_value);
 
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
